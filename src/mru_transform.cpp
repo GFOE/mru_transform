@@ -1,4 +1,32 @@
+/** 
+ * @file mru_transform.cpp 
+ * 
+ * Uses the concept of a "Sensor" which is the collection of three inputs:
+ * position, orientation and velocity.  Multiple sensors can be defined,
+ * but it seems like the most common use-case is for a single "sensor".
+ * 
+ * Private Parameters:
+ *  - map_frame: 
+ *  - base_frame: 
+ *  - odom_frame:
+ *  - odom_topic:
+ *  - sensors: Used to specify the sensor object type - not sure if/how this is used.
+ * 
+ * Subscribes:
+ *  - 
+ *  -
+ * 
+ * Publishes:
+ *  - nav_msgs::Odometry on 'odom'
+ *  - sensor_msgs::NavSatFix on 'nav/position'
+ *  - sensor_msgs::Imu on 'nav/orientation'
+ *  - geometry_msgs::TwistWithCovarianceStamped on 'nav/velocity'
+ *  - std_msgs::String on 'nav/active_sensor'
+ *
+ */
+
 #include <ros/ros.h>
+#include <ros/console.h>
 
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2/LinearMath/Quaternion.h>
@@ -25,6 +53,24 @@
 
 namespace p11 = project11;
 
+/**
+ * @brief Class that creates and broadcasts two transforms.  
+ * 
+ * Class gets created the first time update() is called. Reference position is initial ben pos fix
+ * 
+ * 1. earth to ben/map transform
+ *   * earth-centered to datum transform. This is my best guess based on name conventions
+ *   * datum given when creating class ben's initial position
+ *   * transform published on 2sec timer (Is this a fixed timer?  Should parameterize, and this seems awful slow.)
+ * 2.  ben/map to ben/odom transform
+ *   * transform is all zeros (trans + rot) except rotation.w = 1
+ *   *transform published on 2sec timer
+ * 
+ * Services:
+ * This class also advertises 2 services:
+ * 1. wgs84_to_map: transforms lat/lon/alt into x,y,z from reference datum
+ * 2. map_to_wds84: transforms x,y,z into lat/lon/alt
+ */
 class MapFrame
 {
 public:
@@ -123,12 +169,59 @@ private:
 
 };
 
-// forward declare so Sensor can call it.
+// Forward declare so Sensor can call it.
+// TODO: Should really use a header file.
+/** 
+ * @brief Who knows?
+ * 
+ * publishes /ben/nav/active_sensor (show sensor info hasn't timed out)
+
+creates MapFrame if it doesn't exist
+
+datum given is initial position reported by Time Synchronizer (ben's initial position)
+publishes ben/map to ben/base_link_north_up transform
+
+transform only contains translation from ben/map origin (ben's initial position) to current position
+rotation is all zeros except rotation.w = 1
+publishes ben/base_link_north_up to ben/base_link_level transform
+
+simple rotation transform
+tf_echo shows this is the same as ben/base_link_north_up to ben/base_link transform
+publishes ben/base_link_north_up to ben/base_link transform
+
+simple rotation transform
+tf_echo shows this is the same as ben/base_link_north_up to ben/base_link_level transform
+publishes /ben/nav/position
+publishes /ben/nav/orientation
+publishes /ben/nav/velocity
+
+publishes odometry message (/ben/odom)
+
+pose.position in map frame (x,y,z)
+pose.orientation same as /ben/nav/orientation.orientation
+twist.twist.angular same as /ben/nav/orientation.angular_velocity
+twist.twist.linear is a transform
+transform is a rotation equal to inverse of ben's orientation applied to the /ben/nav/velocity.twisit.twist.linear (line #326 mir_transform.cpp)
+*/
+
+
 void update();
 
+/**
+ * @brief Each instance subscribes to position, velocity and orientation.
+
+Uses Time Synchronizer (￼message_filters - ROS Wiki) to synchronize incoming position, orientation and velocity messages based on timestamp.
+ *
+ * position, orientation and velocity messages/topics can be configure through launch file (see: project11/test_posmv.launch)
+ *
+ * time Synchronizer callback calls update()
+ * 
+ * gets created early in the main(). It only requires names of sensor topics that can be set in launch file. If none are provided it defaults to topics: postion, orientation and velocity
+ */
 class Sensor
 {
 public:
+  /** @brief Constructor used of the "sensors" private parameter is provided **/
   Sensor(XmlRpc::XmlRpcValue const &sensor_param)
   {
     std::string position_topic, orientation_topic, velocity_topic, name;
@@ -138,26 +231,50 @@ public:
     name = std::string(sensor_param["name"]);
     Initialize(position_topic, orientation_topic, velocity_topic, name);
   }
-  
+
+  /** @brief Default constructor using message topics of 'position', 'orientation' and 'velocity. **/
   Sensor()
   {
     Initialize("position", "orientation", "velocity");
   }
-  
+
+  /**
+   * @brief Setup function called by constructors
+   * 
+   * @param position_topic ROS topic for position messages
+   * @param orientation_topic ROS topic for orientation messages
+   * @param velocity_topic ROS topic for velocity messages
+   * @param name Name of this sensor object.
+   */
   void Initialize(const std::string &position_topic, const std::string &orientation_topic , const std::string &velocity_topic, std::string name="default")
   {
     ros::NodeHandle nh;
 
+    // These subscriptions use message_filters::Subscriber filters
+    // which are then typedef'ed for the particular message type.
+    // The typedef seems unnecessary and confusing.
+    // Using the message_filters::Subscriber wraps the ROS subscriber
+    // and allows the callback output to be used as input to the Synchronizer
     m_position_sub = std::shared_ptr<PositionSub>(new PositionSub(nh, position_topic, 1));
     m_orientation_sub =  std::shared_ptr<OrientationSub>(new OrientationSub(nh, orientation_topic, 1));
     m_velocity_sub = std::shared_ptr<VelocitySub>(new VelocitySub(nh, velocity_topic, 1));
 
     m_name = name;
 
+    // Instantiates a SyncType object
+    // which is a globally typedef'ed message_filters::TimeSynchronizer.
+    // This structure makes it unnecessarily unclear.
     m_sync = std::shared_ptr<SyncType>(new SyncType(*m_position_sub, *m_orientation_sub, *m_velocity_sub, 10));
+    // Register the synchonizer's callback so that when we get three
     m_sync->registerCallback(boost::bind(&Sensor::callback, this, _1, _2, _3));
+    // Register the synchonizer's drop callback so we can warn the user
+    m_sync->registerDropCallback(boost::bind(&Sensor::dropCallback, this, _1, _2, _3));
   }
 
+  /** @brief Get the name string of Sensor object.
+   * 
+   * @returns m_name Name string
+   */
   const std::string &getName() const {return m_name;}
 
   sensor_msgs::NavSatFix::ConstPtr lastPositionMessage() const {return m_last_position;}
@@ -165,13 +282,25 @@ public:
   geometry_msgs::TwistWithCovarianceStamped::ConstPtr lastVelocityMessage() const {return m_last_velocity;}
 
   typedef std::shared_ptr<Sensor> Ptr;
+  
 private:
+  /** 
+   * @brief When three messages with the same timestamp, store them and call update() 
+   * 
+   */
   void callback(const sensor_msgs::NavSatFix::ConstPtr & position, const sensor_msgs::Imu::ConstPtr & orientation, const geometry_msgs::TwistWithCovarianceStamped::ConstPtr & velocity)
   {
     m_last_position = position;
     m_last_orientation = orientation;
     m_last_velocity = velocity;
     update();
+  }
+
+  /** @brief Called if we get three messages that are not synced - logs warning */
+  void dropCallback(const sensor_msgs::NavSatFix::ConstPtr & position, const sensor_msgs::Imu::ConstPtr & orientation, const geometry_msgs::TwistWithCovarianceStamped::ConstPtr & velocity)
+  {
+    ROS_WARN("mru_transform: dropped synchronized position, orientation and velocity messages - check your timestamps!");
+      
   }
   
   typedef message_filters::Subscriber<sensor_msgs::NavSatFix> PositionSub;
@@ -192,7 +321,11 @@ private:
   std::string m_name;
 };
 
-// list of sensors, in order of priority
+
+// TODO: This declaration of a bunch of global variables is bad form
+// and makes the code difficult to maintain.  Should include a header and document these variables as attributes of a properly scoped object.
+
+/** @brief List of sensors, in order of priority */
 std::vector<Sensor::Ptr> sensors;
 
 sensor_msgs::NavSatFix::ConstPtr last_sent_position;
@@ -216,6 +349,11 @@ std::shared_ptr<MapFrame> mapFrame;
 std::shared_ptr<tf2_ros::TransformBroadcaster> broadcaster;
 ros::Publisher odom_pub;
 
+/** 
+ * @brief Called by Sensor-syncronizer-callback when three messages with the same timestamp are received.
+ *
+ * 
+ */
 void update()
 {
   ros::Time now = ros::Time::now();
@@ -225,21 +363,89 @@ void update()
   geometry_msgs::TwistWithCovarianceStamped::ConstPtr velocity;
 
   // loop through the sensors until we get an unexpired message of each type
+  // TODO: Use of s->lastPositionMessage() condition
+  // without explicit initialization of
+  // the underlying private variable, or the function output, is prone to
+  // portability problems.
+  bool good_sensor = false;
   for(auto s: sensors)
   {
-    if(!position && s->lastPositionMessage() && now - s->lastPositionMessage()->header.stamp < sensor_timeout && s->lastPositionMessage()->status.status >= 0)
+    if(!position && s->lastPositionMessage() &&
+       now - s->lastPositionMessage()->header.stamp < sensor_timeout &&
+       s->lastPositionMessage()->status.status >= 0)
+    {
       position = s->lastPositionMessage();
-    if(!orientation && s->lastOrientationMessage() && now - s->lastOrientationMessage()->header.stamp < sensor_timeout)
+    }
+    else if (!s->lastPositionMessage())
+    {
+      ROS_WARN_STREAM("mru_transform: Sensor=<" <<
+		      s->getName() <<
+		      "> Cannot use the last position input. "
+		      "Last position message does not exist.");
+    }
+    else if (s->lastPositionMessage() &&
+	     now - s->lastPositionMessage()->header.stamp >= sensor_timeout)
+    {
+      auto dur = now - s->lastPositionMessage()->header.stamp;
+      double dt = dur.toSec();
+      ROS_WARN_STREAM("mru_transform: Sensor=<" <<
+		      s->getName() <<
+		      "> Cannot use the last position input. "
+		      "Check the staleness or status of the position input. "
+		      "Staleness = " << dt << " s.");
+    }
+    else if (s->lastPositionMessage()->status.status < 0)
+    {
+      ROS_WARN_STREAM("mru_transform: Sensor=<" <<
+		      s->getName() <<
+		      "> Cannot use the last position input. "
+		      "Message has bad status.");
+    }
+    else
+    {
+      ROS_WARN_STREAM("mru_transform:  Sensor=<" <<
+		      s->getName() <<
+		      "> Cannot use the last position input. "
+		      "Not sure why?");
+    }
+    if(!orientation && s->lastOrientationMessage() &&
+       now - s->lastOrientationMessage()->header.stamp < sensor_timeout)
+    {
       orientation = s->lastOrientationMessage();
+    }
+    else
+    {
+      ROS_WARN("mru_transform: Cannot use last orientation input. "
+	       "Check staleness of the input");
+    }
     if(!velocity && s->lastVelocityMessage() && now - s->lastVelocityMessage()->header.stamp < sensor_timeout)
+    {
       velocity = s->lastVelocityMessage();
+    }
+    else
+    {
+      ROS_WARN("mru_transform: Cannot use last velocity input. "
+	       "Check staleness of the input");
+    }
     if(position && orientation && velocity)
     {
       std_msgs::String active;
       active.data = s->getName();
       active_sensor_pub.publish(active);
+      good_sensor = true;
       break;
     }
+    else
+    {
+      ROS_WARN_STREAM("mru_transform: Sensor named <" << s->getName() <<
+		      "> will not be used and mru_transform will not "
+		      "publish output if there is not another good Sensor");
+		    
+    }
+  }
+
+  if (!good_sensor){
+    ROS_ERROR("mru_transform: There are no good Sensors. Will not publish nav outputs or tf transforms!");
   }
 
   nav_msgs::Odometry odom;
@@ -320,16 +526,21 @@ void update()
   }
 }
 
-
+/** 
+ * @brief Get params, set up pubs and then just spin.
+ * 
+ */
 int main(int argc, char **argv)
 {
   ros::init(argc, argv, "mru_transform");
     
   ros::NodeHandle nh_private("~");
-  
+
+  // TODO: Verify that the calls were successful and define the behavior if not.
   nh_private.getParam("map_frame", map_frame);
   nh_private.getParam("base_frame", base_frame);
   nh_private.getParam("odom_frame", odom_frame);
+  // TODO: Don't use params to define topic names - use remap.
   nh_private.getParam("odom_topic", odom_topic);
 
   broadcaster = std::shared_ptr<tf2_ros::TransformBroadcaster>(new tf2_ros::TransformBroadcaster);
@@ -338,7 +549,6 @@ int main(int argc, char **argv)
   odom_pub = nh.advertise<nav_msgs::Odometry>(odom_topic, 50);
 
   XmlRpc::XmlRpcValue sensors_param;
-  
   if(nh_private.getParam("sensors", sensors_param))
   {
     if(sensors_param.getType() == XmlRpc::XmlRpcValue::TypeArray)
@@ -347,11 +557,13 @@ int main(int argc, char **argv)
         sensors.push_back(std::shared_ptr<Sensor>(new Sensor(sensors_param[i])));
     }
   }
-  
-  // add a default sensor in none have been found
-  if(sensors.empty())
+  else
+  {
+    ROS_WARN("mru_transform: There is no local ROS parameter 'sensors', "
+	     "so using the defaults.");
     sensors.push_back(std::shared_ptr<Sensor>(new Sensor()));
-
+  }
+      
   // publishers for the selected messages. This should allow subscribers to get the best available from a single set of topics
   position_pub = nh.advertise<sensor_msgs::NavSatFix>("nav/position",10);
   orientation_pub = nh.advertise<sensor_msgs::Imu>("nav/orientation",10);
