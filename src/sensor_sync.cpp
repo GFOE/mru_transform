@@ -1,3 +1,38 @@
+/** 
+ * @file sensor_sync.cpp
+ * 
+ * Utility node associated with mru_transform node to force the three inputs
+ * (position, velocity and orientation) to have the same 
+ * header timestamp.
+ *
+ * Uses ROS [message_filters](http://wiki.ros.org/message_filters).
+ * 
+ * Private Parameters:
+ *  - outTopicPrefix (string): Prepends to all published topics.  
+ *      Default = "out/" 
+ *  - inTopicPrefix (string): Prepends to all subscribed topics.  
+ *      Default = "in/" 
+ *  - twistHasCovariance (bool): 
+ *       If true, subscribes with message type = TwistWithCovarianceStamped.
+ *       If false, subscribes with message type = TwistStamped.
+ *       Default is false.
+ * 
+ * Subscribers: 
+ *  - NavSatFix on 'in/position'
+ *  - Imu on 'in/orientation'
+ *  - {TwistWithCovarianceStamped OR TwistStamped} on 'in/velocity`  
+ *      See twistHasCovariance parameter.
+ * 
+ * Publishes:
+ *  - NavSatFix on 'out/position'
+ *  - Imu on 'out/orientation'
+ *  - TwistWithCovarianceStamped on 'out/velocity' 
+ * 
+ * TODO:
+ *  - outTopicPrefix is superfluous - use <remap>
+ *  - Ditto for inTopicPrefix
+ */
+
 // Roland Arsenault
 // Center for Coastal and Ocean Mapping
 // University of New Hampshire
@@ -50,6 +85,13 @@ template <> void sensorCallback<geometry_msgs::TwistStamped>(const sensor_msgs::
   mru_velocity_pub.publish(twcs);
 }
 
+/** 
+ * @brief Sets up the message_filters subscribers and synchronizer
+ * 
+ * The function is templated as a means of polymorphism for subscribing
+ * to 'velocity' for either TwistWithCovarianceStamped or TwistStamped 
+ * message types.
+ */
 template<typename T> void run(ros::NodeHandle& n)
 {
   std::string in_topic_prefix;
@@ -64,7 +106,7 @@ template<typename T> void run(ros::NodeHandle& n)
   ros::spin();
 }
 
-int main(int argc, char **argv)
+ int main(int argc, char **argv)
 {
     ros::init(argc, argv, "echo_helm");
     ros::NodeHandle n;
